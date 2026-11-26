@@ -1,50 +1,180 @@
-const main = (config) => {
+// Version: 2026.11.26-Android
+// 适用客户端: Android FlClash / Clash Meta for Android (Mihomo 内核)
+// 特点: 零 DNS 泄露隔离、mixed 兼容网络栈、放行国内厂商推送通道、仅保留 YouTube 去广告
 
-  // ================================================================
-  // 1. Android 专属基础配置
-  // ================================================================
-  config["mixed-port"] = 7890;
-  config["mode"] = "rule";
-  config["unified-delay"] = true;
-  config["tcp-concurrent"] = true;
-  config["log-level"] = "error";
-  config["ipv6"] = false;
-  config["allow-lan"] = false;
-  config["find-process-mode"] = "always";
-  config["keep-alive-interval"] = 30;
-  config["keep-alive-idle"] = 30;
+function main(config) {
+  return buildBaseConfig(config, {
+    tunStack: "mixed",
+    extraFakeIpFilter: [
+      "+.push.apple.com",
+      "+.xiaomi.com",
+      "+.miui.com",
+      "+.hicloud.com",
+      "+.dbankcloud.cn",
+      "+.vivo.com.cn",
+      "+.heytapmobi.com",
+      "+.meizu.com"
+    ],
+    extraTunConfig: {
+      "strict-route": false
+    }
+  });
+}
 
-  config["profile"] = {
-    "store-selected": true,
-    "store-fake-ip": true
-  };
+// 1. 节点地区自动分组与空节点容错保护
+const regionConfig = [
+  { name: "🇭🇰 香港节点", regex: /港|HK|Hong Kong|HongKong/i },
+  { name: "🇹🇼 台湾节点", regex: /台|TW|Taiwan|Taipei/i },
+  { name: "🇯🇵 日本节点", regex: /日|JP|Japan|Tokyo|Osaka/i },
+  { name: "🇸🇬 新加坡节点", regex: /新|狮城|SG|Singapore/i },
+  { name: "🇰🇷 韩国节点", regex: /韩|KR|Korea|Seoul/i },
+  { name: "🇺🇸 美国节点", regex: /美|US|United States|America|Los Angeles|San Jose|Seattle/i },
+  { name: "🇨🇦 加拿大节点", regex: /加|CA|Canada|Toronto|Vancouver/i },
+  { name: "🇬🇧 英国节点", regex: /英|UK|United Kingdom|Britain|London/i }
+];
 
-  // ================================================================
-  // 2. DNS 配置 (Fake-IP + 国内外分流解析)
-  // ================================================================
+const ruleProviders = {
+  reject_youtube: {
+    type: "http",
+    behavior: "domain",
+    url: "https://ghfast.top/https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/reject.txt",
+    path: "./ruleset/reject.yaml",
+    interval: 86400
+  },
+  private: {
+    type: "http",
+    behavior: "domain",
+    url: "https://ghfast.top/https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/private.txt",
+    path: "./ruleset/private.yaml",
+    interval: 86400
+  },
+  cncidr: {
+    type: "http",
+    behavior: "ipcidr",
+    url: "https://ghfast.top/https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/cncidr.txt",
+    path: "./ruleset/cncidr.yaml",
+    interval: 86400
+  },
+  direct: {
+    type: "http",
+    behavior: "domain",
+    url: "https://ghfast.top/https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/direct.txt",
+    path: "./ruleset/direct.yaml",
+    interval: 86400
+  },
+  proxy: {
+    type: "http",
+    behavior: "domain",
+    url: "https://ghfast.top/https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/proxy.txt",
+    path: "./ruleset/proxy.yaml",
+    interval: 86400
+  },
+  telegramcidr: {
+    type: "http",
+    behavior: "ipcidr",
+    url: "https://ghfast.top/https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/telegramcidr.txt",
+    path: "./ruleset/telegramcidr.yaml",
+    interval: 86400
+  }
+};
+
+function buildBaseConfig(config, platformOptions) {
+  const proxies = config.proxies || [];
+  const allProxyNames = proxies.map(p => p.name);
+  if (allProxyNames.length === 0) return config;
+
+  const matchedSet = new Set();
+  const regionGroups = [];
+  const availableRegionNames = [];
+
+  for (const reg of regionConfig) {
+    const matched = allProxyNames.filter(name => reg.regex.test(name));
+    matched.forEach(n => matchedSet.add(n));
+    const groupProxies = matched.length > 0 ? matched : ["DIRECT"];
+    if (matched.length > 0) {
+      availableRegionNames.push(reg.name);
+    }
+    regionGroups.push({
+      name: reg.name,
+      type: "url-test",
+      url: "https://www.gstatic.com/generate_204",
+      interval: 300,
+      tolerance: 50,
+      proxies: groupProxies
+    });
+  }
+
+  const otherProxies = allProxyNames.filter(name => !matchedSet.has(name));
+  if (otherProxies.length > 0) {
+    availableRegionNames.push("🌐 其他地区");
+  }
+  regionGroups.push({
+    name: "🌐 其他地区",
+    type: "select",
+    proxies: otherProxies.length > 0 ? otherProxies : ["DIRECT"]
+  });
+
+  const mainSelectorOptions = [
+    "♻️ 自动选择",
+    ...availableRegionNames,
+    "DIRECT",
+    ...allProxyNames
+  ];
+
+  const serviceSelectorOptions = [
+    "🚀 节点选择",
+    ...availableRegionNames,
+    "♻️ 自动选择",
+    "DIRECT"
+  ];
+
+  const aiSelectorOptions = [
+    ...availableRegionNames.filter(n => !n.includes("香港")),
+    "🚀 节点选择",
+    ...allProxyNames.filter(n => !/港|HK|Hong Kong/i.test(n))
+  ];
+  if (aiSelectorOptions.length === 0) aiSelectorOptions.push("🚀 节点选择");
+
+  const serviceGroups = [
+    { name: "🚀 节点选择", type: "select", proxies: mainSelectorOptions },
+    { name: "♻️ 自动选择", type: "url-test", url: "https://www.gstatic.com/generate_204", interval: 300, tolerance: 50, proxies: allProxyNames },
+    { name: "🤖 AI 服务", type: "select", proxies: aiSelectorOptions },
+    { name: "📹 YouTube", type: "select", proxies: serviceSelectorOptions },
+    { name: "🔍 Google", type: "select", proxies: serviceSelectorOptions },
+    { name: "🐙 GitHub", type: "select", proxies: serviceSelectorOptions },
+    { name: "🎬 Netflix", type: "select", proxies: serviceSelectorOptions },
+    { name: "🎵 Spotify", type: "select", proxies: serviceSelectorOptions },
+    { name: "🎮 Steam", type: "select", proxies: ["DIRECT", ...serviceSelectorOptions] },
+    { name: "📲 Telegram", type: "select", proxies: serviceSelectorOptions },
+    { name: "🎵 TikTok", type: "select", proxies: aiSelectorOptions },
+    { name: "🍎 Apple", type: "select", proxies: ["DIRECT", ...serviceSelectorOptions] },
+    { name: "🪟 Microsoft", type: "select", proxies: ["DIRECT", ...serviceSelectorOptions] },
+    { name: "⚡ 测速工具", type: "select", proxies: ["DIRECT", ...serviceSelectorOptions] },
+    { name: "🐟 漏网之鱼", type: "select", proxies: ["🚀 节点选择", "DIRECT"] }
+  ];
+
+  config["proxy-groups"] = [
+    ...serviceGroups,
+    ...regionGroups
+  ];
+
+  // 四段式防 DNS 泄露配置 (关闭易泄露的 fallback，依赖 nameserver-policy + respect-rules 严格隔离)
   config["dns"] = {
     "enable": true,
-    "listen": "0.0.0.0:53",
-    "prefer-h3": false,
+    "listen": "0.0.0.0:1053",
     "ipv6": false,
     "enhanced-mode": "fake-ip",
     "fake-ip-range": "198.18.0.1/16",
-    "fake-ip-filter": [
-      "+.lan", "+.local", "+.localhost", "+.home.arpa",
-      "time.*.com", "time.*.gov", "pool.ntp.org",
-      "connectivitycheck.gstatic.com", "connectivitycheck.android.com",
-      "www.msftconnecttest.com", "www.msftncsi.com",
-      "connect.rom.miui.com", "wifi.vivo.com.cn", "connectivitycheck.platform.hicloud.com",
-      "+.market.xiaomi.com", "+.kspkg.com", "+.hicloud.com", "+.dbankcloud.cn",
-      "+.oppomobile.com", "+.heytapmobi.com", "+.vivo.com.cn",
-      "+.weixin.qq.com", "+.wechat.com", "+.qpic.cn", "+.wx.qq.com",
-      "+.qlogo.cn", "+.tenpay.com", "+.wechatpay.cn", "+.servicewechat.com",
-      "+.alipay.com", "+.alipayobjects.com", "+.taobao.com", "+.alicdn.com",
-      "+.jd.com", "+.360buyimg.com", "+.360buy.com", "+.jcloudcs.com",
-      "+.douyin.com", "+.amemv.com", "+.pstatp.com", "+.bilivideo.com", "+.bilibili.com",
-      "+.music.163.com", "+.y.qq.com", "+.baidupcs.com"
+    "use-hosts": true,
+    "respect-rules": true,
+    "default-nameserver": [
+      "223.5.5.5",
+      "119.29.29.29"
     ],
-    "default-nameserver": ["223.5.5.5", "119.29.29.29"],
+    "proxy-server-nameserver": [
+      "https://dns.alidns.com/dns-query",
+      "https://doh.pub/dns-query"
+    ],
     "nameserver": [
       "https://dns.alidns.com/dns-query",
       "https://doh.pub/dns-query"
@@ -54,331 +184,89 @@ const main = (config) => {
         "https://dns.alidns.com/dns-query",
         "https://doh.pub/dns-query"
       ],
-      "geolocation-!cn": [
-        "https://cloudflare-dns.com/dns-query",
-        "https://dns.google/dns-query"
+      "geosite:geolocation-!cn": [
+        "https://dns.google/dns-query#🚀 节点选择",
+        "https://cloudflare-dns.com/dns-query#🚀 节点选择"
       ]
     },
-    "direct-nameserver": [
-      "https://dns.alidns.com/dns-query",
-      "https://doh.pub/dns-query"
-    ],
-    "fallback": [
-      "https://cloudflare-dns.com/dns-query",
-      "https://dns.google/dns-query"
-    ],
-    "fallback-filter": {
-      "geoip": true,
-      "geoip-code": "CN",
-      "geosite": ["gfw"]
-    },
-    "proxy-server-nameserver": ["223.5.5.5", "119.29.29.29"]
+    "fake-ip-filter": [
+      "*.lan",
+      "*.local",
+      "localhost.ptlogin2.qq.com",
+      "+.srv.nintendo.net",
+      "+.stun.playstation.net",
+      "xbox.*.microsoft.com",
+      "+.xboxlive.com",
+      "+.msftconnecttest.com",
+      "+.msftncsi.com",
+      "time.*.com",
+      "ntp.*.com",
+      "+.pool.ntp.org",
+      ...platformOptions.extraFakeIpFilter
+    ]
   };
 
-  // ================================================================
-  // 3. TUN 虚拟网卡 & 域名嗅探配置 (适配 Android 各客户端)
-  // ================================================================
   config["tun"] = {
     "enable": true,
-    "stack": "gvisor",
-    "dns-hijack": ["any:53"],
+    "stack": platformOptions.tunStack,
+    "dns-hijack": ["any:53", "tcp://any:53"],
     "auto-route": true,
     "auto-detect-interface": true,
-    "strict-route": false,
-    "mtu": 1400,
-    "inet4-address": ["172.19.0.1/30"],
-    "disable-icmp-forwarding": true
+    ...platformOptions.extraTunConfig
   };
 
   config["sniffer"] = {
     "enable": true,
-    "parse-pure-ip": false,
     "force-dns-mapping": true,
-    "override-destination": true,
+    "parse-pure-ip": true,
     "sniff": {
-      "HTTP": { "ports": [80, "8080-8880"] },
+      "HTTP": { "ports": [80, "8080-8880"], "override-destination": true },
       "TLS": { "ports": [443, 8443] },
       "QUIC": { "ports": [443, 8443] }
-    },
-    "skip-domain": [
-      "+.mijia.cloud", "+.hicloud.com",
-      "+.weixin.qq.com", "+.wechat.com", "+.wx.qq.com",
-      "+.tenpay.com", "+.wechatpay.cn", "+.servicewechat.com",
-      "+.alipay.com", "+.alipayobjects.com",
-      "+.jd.com", "+.douyin.com", "+.amemv.com",
-      "+.market.xiaomi.com", "+.kspkg.com"
-    ]
-  };
-
-  // ================================================================
-  // 4. 动态提取节点并按国家/地区归类（无节点地区自动隐藏）
-  // ================================================================
-  const originalProxies = Array.isArray(config["proxies"]) ? config["proxies"] : [];
-
-  const invalidRegex = /(群|邀请|返利|循环|官网|客服|网站|网址|获取|订阅|到期|下次|重置|剩余流量|已用|联系|邮箱|工单|贩卖|通知|倒卖|防止|无法|说明|特别|教程|关注|更新|作者|加入|超时|失联|\b(USE|USED|TOTAL|EXPIRE|EMAIL|Panel|Channel|Traffic)\b|\d{4}-\d{2}-\d{2})/i;
-
-  const proxyNames = originalProxies
-    .filter(p => p && p.name && !invalidRegex.test(p.name))
-    .map(p => p.name);
-
-  const regionPatterns = {
-    "香港": [/香港/i, /\bHK\b/i, /HKG/i, /Hong\s*Kong/i, /HongKong/i],
-    "台湾": [/台湾/i, /台灣/i, /\bTW\b/i, /TPE/i, /Taiwan/i],
-    "日本": [/日本/i, /\bJP\b/i, /NRT/i, /HND/i, /KIX/i, /Japan/i, /Tokyo/i],
-    "新加坡": [/新加坡/i, /\bSG\b/i, /SIN/i, /Singapore/i],
-    "美国": [/美国/i, /\bUS\b/i, /\bUSA\b/i, /United\s*States/i, /America/i],
-    "韩国": [/韩国/i, /韓國/i, /\bKR\b/i, /KOR/i, /Korea/i, /Seoul/i]
-  };
-
-  const regionNodes = {
-    "香港": [], "台湾": [], "日本": [], "新加坡": [], "美国": [], "韩国": [], "其他地区": []
-  };
-
-  proxyNames.forEach((name) => {
-    let matched = false;
-    for (const [reg, pats] of Object.entries(regionPatterns)) {
-      if (pats.some(p => p.test(name))) {
-        regionNodes[reg].push(name);
-        matched = true;
-        break;
-      }
     }
-    if (!matched) {
-      regionNodes["其他地区"].push(name);
-    }
-  });
-
-  const regionIcons = {
-    "香港": "https://fastly.jsdelivr.net/gh/Koolson/Qure@master/IconSet/Color/Hong_Kong.png",
-    "台湾": "https://fastly.jsdelivr.net/gh/Koolson/Qure@master/IconSet/Color/Taiwan.png",
-    "日本": "https://fastly.jsdelivr.net/gh/Koolson/Qure@master/IconSet/Color/Japan.png",
-    "新加坡": "https://fastly.jsdelivr.net/gh/Koolson/Qure@master/IconSet/Color/Singapore.png",
-    "美国": "https://fastly.jsdelivr.net/gh/Koolson/Qure@master/IconSet/Color/United_States.png",
-    "韩国": "https://fastly.jsdelivr.net/gh/Koolson/Qure@master/IconSet/Color/Korea.png",
-    "其他地区": "https://fastly.jsdelivr.net/gh/Koolson/Qure@master/IconSet/Color/Global.png"
   };
 
-  const activeRegionGroups = [];
-  const availableRegionNames = [];
+  config["rule-providers"] = ruleProviders;
 
-  Object.entries(regionNodes).forEach(([regName, nodes]) => {
-    if (nodes.length > 0) {
-      activeRegionGroups.push({
-        name: regName,
-        type: "url-test",
-        proxies: nodes,
-        url: "http://cp.cloudflare.com/generate_204",
-        interval: 300,
-        tolerance: 50,
-        lazy: true,
-        icon: regionIcons[regName]
-      });
-      availableRegionNames.push(regName);
-    }
-  });
-
-  // ================================================================
-  // 5. 全场景核心策略组 (AI 与 TikTok 自动排除香港)
-  // ================================================================
-  const iconBase = "https://cdn.jsdelivr.net/gh/n0de-sudo/Perfect-Rules@main/Clash/icons/";
-  const nonHkRegions = availableRegionNames.filter(r => !r.includes("香港"));
-
-  const coreGroups = [
-    {
-      name: "节点选择",
-      type: "select",
-      proxies: ["自动选择", "手动选择", ...availableRegionNames, "DIRECT"],
-      icon: "https://fastly.jsdelivr.net/gh/Koolson/Qure@master/IconSet/Color/Proxy.png"
-    },
-    {
-      name: "自动选择",
-      type: "url-test",
-      proxies: proxyNames.slice(),
-      url: "http://cp.cloudflare.com/generate_204",
-      interval: 300,
-      tolerance: 50,
-      lazy: true,
-      icon: "https://fastly.jsdelivr.net/gh/Koolson/Qure@master/IconSet/Color/Auto.png"
-    },
-    {
-      name: "手动选择",
-      type: "select",
-      proxies: proxyNames.slice(),
-      icon: "https://fastly.jsdelivr.net/gh/Koolson/Qure@master/IconSet/Color/Direct.png"
-    },
-    {
-      name: "AI平台",
-      type: "select",
-      proxies: [...nonHkRegions, "手动选择", "节点选择"],
-      icon: "https://fastly.jsdelivr.net/gh/Koolson/Qure@master/IconSet/Color/ChatGPT.png"
-    },
-    {
-      name: "TikTok",
-      type: "select",
-      proxies: [...nonHkRegions, "手动选择", "节点选择"],
-      icon: "https://fastly.jsdelivr.net/gh/Koolson/Qure@master/IconSet/Color/TikTok.png"
-    },
-    {
-      name: "国外媒体",
-      type: "select",
-      proxies: ["节点选择", "手动选择", ...availableRegionNames],
-      icon: iconBase + "YouTube.png"
-    },
-    {
-      name: "电报消息",
-      type: "select",
-      proxies: ["节点选择", "手动选择", ...availableRegionNames],
-      icon: "https://fastly.jsdelivr.net/gh/Koolson/Qure@master/IconSet/Color/Telegram.png"
-    },
-    {
-      name: "谷歌服务",
-      type: "select",
-      proxies: ["节点选择", "手动选择", ...availableRegionNames, "DIRECT"],
-      icon: iconBase + "Google.png"
-    },
-    {
-      name: "微软服务",
-      type: "select",
-      proxies: ["DIRECT", "节点选择", ...availableRegionNames],
-      icon: "https://fastly.jsdelivr.net/gh/Koolson/Qure@master/IconSet/Color/Microsoft.png"
-    },
-    {
-      name: "漏网之鱼",
-      type: "select",
-      proxies: ["节点选择", "DIRECT"],
-      icon: "https://fastly.jsdelivr.net/gh/Koolson/Qure@master/IconSet/Color/Final.png"
-    }
-  ];
-
-  config["proxy-groups"] = [...coreGroups, ...activeRegionGroups];
-
-  // ================================================================
-  // 6. 远程规则提供器
-  // ================================================================
-  const ruleBase = "https://cdn.jsdelivr.net/gh/n0de-sudo/Perfect-Rules@main/Clash/rules/";
-  const mkRule = (f) => ({
-    type: "http",
-    behavior: "classical",
-    format: "yaml",
-    url: ruleBase + f,
-    path: "./rules/" + f,
-    interval: 86400
-  });
-
-  config["rule-providers"] = {
-    "AI": mkRule("ai.yaml"),
-    "TikTok": mkRule("tiktok.yaml"),
-    "YouTube": mkRule("youtube.yaml"),
-    "Netflix": mkRule("netflix.yaml"),
-    "Spotify": mkRule("spotify.yaml"),
-    "Telegram": mkRule("telegram.yaml"),
-    "Google": mkRule("google.yaml"),
-    "Microsoft": mkRule("microsoft.yaml")
-  };
-
-  // ================================================================
-  // 7. Android 全场景分流规则
-  // ================================================================
+  // 克制型分流规则：仅保留 YouTube 广告及 QUIC/UDP 443 屏蔽，避免误伤微信/抖音/京东
   config["rules"] = [
-    "DOMAIN-SUFFIX,lan,DIRECT",
-    "DOMAIN-SUFFIX,local,DIRECT",
-    "DOMAIN-SUFFIX,localhost,DIRECT",
-    "IP-CIDR,127.0.0.0/8,DIRECT,no-resolve",
-    "IP-CIDR,10.0.0.0/8,DIRECT,no-resolve",
-    "IP-CIDR,172.16.0.0/12,DIRECT,no-resolve",
-    "IP-CIDR,192.168.0.0/16,DIRECT,no-resolve",
-    "DOMAIN-SUFFIX,speedtest.net,DIRECT",
-    "DOMAIN-SUFFIX,ooklaserver.net,DIRECT",
-    "DOMAIN-KEYWORD,speedtest,DIRECT",
-    "DOMAIN-SUFFIX,market.xiaomi.com,DIRECT",
-    "DOMAIN-SUFFIX,market.intl.xiaomi.com,DIRECT",
-    "DOMAIN-SUFFIX,xiaomi.com,DIRECT",
-    "DOMAIN-SUFFIX,xiaomi.net,DIRECT",
-    "DOMAIN-SUFFIX,mi-img.com,DIRECT",
-    "DOMAIN-SUFFIX,mi.com,DIRECT",
-    "DOMAIN-SUFFIX,kspkg.com,DIRECT",
-    "DOMAIN-SUFFIX,ksyun.com,DIRECT",
-    "DOMAIN-KEYWORD,appmifile,DIRECT",
-    "DOMAIN-KEYWORD,market-app,DIRECT",
-    "DOMAIN-SUFFIX,hicloud.com,DIRECT",
-    "DOMAIN-SUFFIX,dbankcloud.cn,DIRECT",
-    "DOMAIN-SUFFIX,honor.cn,DIRECT",
-    "DOMAIN-SUFFIX,oppomobile.com,DIRECT",
-    "DOMAIN-SUFFIX,heytapmobi.com,DIRECT",
-    "DOMAIN-SUFFIX,vivo.com.cn,DIRECT",
-    "DOMAIN-SUFFIX,myapp.com,DIRECT",
-    "DOMAIN-SUFFIX,weixin.qq.com,DIRECT",
-    "DOMAIN-SUFFIX,wechat.com,DIRECT",
-    "DOMAIN-SUFFIX,qpic.cn,DIRECT",
-    "DOMAIN-SUFFIX,weixin.com,DIRECT",
-    "DOMAIN-SUFFIX,wx.qq.com,DIRECT",
-    "DOMAIN-SUFFIX,qlogo.cn,DIRECT",
-    "DOMAIN-SUFFIX,tenpay.com,DIRECT",
-    "DOMAIN-SUFFIX,wechatpay.cn,DIRECT",
-    "DOMAIN-SUFFIX,servicewechat.com,DIRECT",
-    "DOMAIN-KEYWORD,weixin,DIRECT",
-    "IP-CIDR,101.32.0.0/16,DIRECT,no-resolve",
-    "IP-CIDR,109.244.0.0/16,DIRECT,no-resolve",
-    "IP-CIDR,129.226.0.0/16,DIRECT,no-resolve",
-    "IP-CIDR,183.3.224.0/19,DIRECT,no-resolve",
-    "AND,((DST-PORT,80),(GEOIP,cn)),DIRECT",
-    "DOMAIN-SUFFIX,alipay.com,DIRECT",
-    "DOMAIN-SUFFIX,alipayobjects.com,DIRECT",
-    "DOMAIN-SUFFIX,taobao.com,DIRECT",
-    "DOMAIN-SUFFIX,tmall.com,DIRECT",
-    "DOMAIN-SUFFIX,alicdn.com,DIRECT",
-    "DOMAIN-SUFFIX,amap.com,DIRECT",
-    "DOMAIN-SUFFIX,dingtalk.com,DIRECT",
-    "DOMAIN-SUFFIX,byteimg.com,DIRECT",
-    "DOMAIN-SUFFIX,dcdapp.com,DIRECT",
-    "DOMAIN-SUFFIX,dongchedi.com,DIRECT",
-    "DOMAIN-KEYWORD,douyinvod,DIRECT",
-    "DOMAIN-SUFFIX,amemv.com,DIRECT",
-    "DOMAIN-SUFFIX,pstatp.com,DIRECT",
-    "DOMAIN-SUFFIX,douyin.com,DIRECT",
-    "DOMAIN-SUFFIX,bilibili.com,DIRECT",
-    "DOMAIN-SUFFIX,bilivideo.com,DIRECT",
-    "DOMAIN-SUFFIX,hdslb.com,DIRECT",
-    "DOMAIN-SUFFIX,xiaohongshu.com,DIRECT",
-    "DOMAIN-SUFFIX,xhscdn.com,DIRECT",
-    "DOMAIN-SUFFIX,meituan.com,DIRECT",
-    "DOMAIN-SUFFIX,dianping.com,DIRECT",
-    "DOMAIN-SUFFIX,pinduoduo.com,DIRECT",
-    "DOMAIN-SUFFIX,yangkeduo.com,DIRECT",
-    "DOMAIN-SUFFIX,baidu.com,DIRECT",
-    "DOMAIN-SUFFIX,baidupcs.com,DIRECT",
-    "DOMAIN-SUFFIX,163.com,DIRECT",
-    "DOMAIN-SUFFIX,126.net,DIRECT",
-    "DOMAIN-SUFFIX,qq.com,DIRECT",
-    "DOMAIN-SUFFIX,12306.cn,DIRECT",
-    "DOMAIN-SUFFIX,jd.com,DIRECT",
-    "DOMAIN-SUFFIX,360buy.com,DIRECT",
-    "DOMAIN-SUFFIX,360buyimg.com,DIRECT",
-    "DOMAIN-SUFFIX,jcloudcs.com,DIRECT",
-    "DOMAIN-SUFFIX,jdpay.com,DIRECT",
-    "DOMAIN-SUFFIX,ithome.com,DIRECT",
-    "DOMAIN-SUFFIX,ruanmei.com,DIRECT",
-    "AND,((DST-PORT,443),(NETWORK,udp),(DOMAIN-SUFFIX,googlevideo.com)),REJECT",
-    "AND,((DST-PORT,443),(NETWORK,udp),(DOMAIN-SUFFIX,youtube.com)),REJECT",
-    "DOMAIN,s.youtube.com,REJECT",
-    "DOMAIN,video-stats.l.google.com,REJECT",
-    "DOMAIN-SUFFIX,googlesyndication.com,REJECT",
+    // 局域网与私有地址直连
+    "RULE-SET,private,DIRECT",
+    "GEOIP,PRIVATE,DIRECT,no-resolve",
+
+    // 仅保留 YouTube 去广告与屏蔽 QUIC 强制走 TCP 提升去广告效果
+    "AND,((DOMAIN-SUFFIX,googlevideo.com),(NETWORK,UDP),(DST-PORT,443)),REJECT",
+    "DOMAIN-SUFFIX,doubleclick.net,REJECT",
     "DOMAIN-SUFFIX,googleadservices.com,REJECT",
-    "DOMAIN,youtubei.googleapis.com,国外媒体",
-    "RULE-SET,AI,AI平台",
-    "RULE-SET,TikTok,TikTok",
-    "RULE-SET,YouTube,国外媒体",
-    "RULE-SET,Netflix,国外媒体",
-    "RULE-SET,Spotify,国外媒体",
-    "RULE-SET,Telegram,电报消息",
-    "RULE-SET,Google,谷歌服务",
-    "RULE-SET,Microsoft,微软服务",
-    "GEOSITE,private,DIRECT",
-    "GEOIP,private,DIRECT,no-resolve",
+    "DOMAIN-SUFFIX,googlesyndication.com,REJECT",
+
+    // 常用服务精准分流
+    "GEOSITE,openai,🤖 AI 服务",
+    "GEOSITE,anthropic,🤖 AI 服务",
+    "DOMAIN-SUFFIX,gemini.google.com,🤖 AI 服务",
+    "DOMAIN-SUFFIX,claude.ai,🤖 AI 服务",
+    "DOMAIN-SUFFIX,perplexity.ai,🤖 AI 服务",
+
+    "GEOSITE,youtube,📹 YouTube",
+    "GEOSITE,github,🐙 GitHub",
+    "GEOSITE,google,🔍 Google",
+    "GEOSITE,netflix,🎬 Netflix",
+    "GEOSITE,spotify,🎵 Spotify",
+    "GEOSITE,steam,🎮 Steam",
+    "GEOSITE,telegram,📲 Telegram",
+    "RULE-SET,telegramcidr,📲 Telegram,no-resolve",
+    "GEOSITE,tiktok,🎵 TikTok",
+    "GEOSITE,apple,🍎 Apple",
+    "GEOSITE,microsoft,🪟 Microsoft",
+    "GEOSITE,speedtest,⚡ 测速工具",
+
+    // 国内直连与海外代理兜底
+    "RULE-SET,direct,DIRECT",
     "GEOSITE,cn,DIRECT",
-    "GEOIP,cn,DIRECT,no-resolve",
-    "MATCH,漏网之鱼"
+    "GEOIP,CN,DIRECT,no-resolve",
+    "RULE-SET,proxy,🚀 节点选择",
+    "MATCH,🐟 漏网之鱼"
   ];
 
   return config;
-};
+}
